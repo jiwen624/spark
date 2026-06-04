@@ -1,0 +1,50 @@
+# Empirical reachability run — TableOutputResolver CANNOT_FIND_DATA renders
+
+Branch: spark-57223-toSQLId-deadcode-evidence
+Instrumentation: evidence/instrumentation.patch (applied to TableOutputResolver.scala)
+
+## Command
+
+build/sbt 'sql/testOnly \
+  *DataFrameWriterV2Suite *DataSourceV2SQLSuite *DataSourceV2DataFrameSuite \
+  *ResolveDefaultColumnsSuite *SQLInsertTestSuite \
+  *AlignUpdateAssignmentsSuite *AlignMergeAssignmentsSuite \
+  *DeltaBasedMergeIntoSchemaEvolutionScalaSuite *GroupBasedMergeIntoSchemaEvolutionScalaSuite'
+
+These suites exercise the V2 write / INSERT / MERGE / UPDATE output-column
+resolution paths that flow through TableOutputResolver.
+
+## Result
+
+    $ grep -oP 'MARK_[A-Z0-9_]+' run.log | sort | uniq -c
+         19 MARK_391_POSITIVE_CONTROL
+
+    [info] Tests: succeeded 759, failed 0, canceled 0, ignored 0, pending 0
+
+## Interpretation
+
+| Marker | Site | Fired |
+|--------|------|-------|
+| MARK_391_POSITIVE_CONTROL | line 391 (`EXTRA_COLUMNS` render — a *reachable* line) | **19** |
+| MARK_ADDERROR | the `addError` callback that feeds the `errors` buffer | 0 |
+| MARK_132 | line 132 `if (errors.nonEmpty)` CANNOT_FIND_DATA | 0 |
+| MARK_405 | line 405 CANNOT_FIND_DATA (by-name, enforceFullOutput) | 0 |
+| MARK_487 | line 487 CANNOT_FIND_DATA (by-position, count mismatch) | 0 |
+| MARK_548 | line 548 CANNOT_FIND_DATA (struct fallback) | 0 |
+| MARK_590_657 | lines 590/657 CANNOT_FIND_DATA (array/map fallback) | 0 |
+
+The positive control (`MARK_391_POSITIVE_CONTROL`) firing 19 times proves the
+instrumentation works and `System.err` output is captured by the test harness.
+Therefore the zero counts are real: across 759 write/insert/merge/update tests,
+none of the six CANNOT_FIND_DATA render lines executed, and the `addError`
+callback was never invoked.
+
+## A second, independent run (earlier battery)
+
+A prior run over a slightly different suite set produced the same outcome:
+
+    Tests: succeeded 762, failed 0
+    grep -oP 'MARK_[A-Z0-9_]+' | sort | uniq -c   ->   (no output)
+
+(In that earlier run the positive control marker had not yet been added, so no
+markers fired at all.)

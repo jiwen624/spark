@@ -114,7 +114,7 @@ object TableOutputResolver extends SQLConfHelper with Logging {
         query.output,
         expected,
         conf,
-        errors += _,
+        { (m: String) => System.err.println("MARK_ADDERROR"); errors += m },
         Nil,
         defaultValueFillMode,
         enforceFullOutput = true)
@@ -124,10 +124,11 @@ object TableOutputResolver extends SQLConfHelper with Logging {
           tableName, expected.map(_.name), query.output)
       }
       resolveColumnsByPosition(
-        tableName, query.output, expected, conf, errors += _, fillDefaultValue = fillDefaultValue)
+        tableName, query.output, expected, conf, { (m: String) => System.err.println("MARK_ADDERROR"); errors += m }, fillDefaultValue = fillDefaultValue)
     }
 
     if (errors.nonEmpty) {
+      System.err.println("MARK_132")
       throw QueryCompilationErrors.incompatibleDataToTableCannotFindDataError(
         tableName, expected.map(_.name).map(toSQLId).mkString(", "))
     }
@@ -387,6 +388,7 @@ object TableOutputResolver extends SQLConfHelper with Logging {
 
     if (reordered.length == expectedCols.length) {
       if (matchedCols.size < inputCols.length) {
+        System.err.println("MARK_391_POSITIVE_CONTROL")
         val extraCols = inputCols.filterNot(col => matchedCols.contains(col.name))
           .map(col => s"${toSQLId(col.name)}").mkString(", ")
         if (colPath.isEmpty) {
@@ -402,7 +404,7 @@ object TableOutputResolver extends SQLConfHelper with Logging {
     } else if (enforceFullOutput) {
       val colName =
         if (colPath.nonEmpty) colPath.quoted
-        else expectedCols.map(_.name).map(toSQLId).mkString(", ")
+        else { System.err.println("MARK_405"); expectedCols.map(_.name).map(toSQLId).mkString(", ") }
       throw QueryCompilationErrors.incompatibleDataToTableCannotFindDataError(tableName, colName)
     } else {
       Nil
@@ -484,7 +486,7 @@ object TableOutputResolver extends SQLConfHelper with Logging {
     if (result.length != actualExpectedCols.size) {
       val colName =
         if (colPath.nonEmpty) colPath.quoted
-        else actualExpectedCols.map(_.name).map(toSQLId).mkString(", ")
+        else { System.err.println("MARK_487"); actualExpectedCols.map(_.name).map(toSQLId).mkString(", ") }
       throw QueryCompilationErrors.incompatibleDataToTableCannotFindDataError(tableName, colName)
     }
     result
@@ -545,7 +547,7 @@ object TableOutputResolver extends SQLConfHelper with Logging {
     } else if (enforceFullOutput) {
       val colName =
         if (colPath.nonEmpty) colPath.quoted
-        else expectedType.fields.map(_.name).map(toSQLId).mkString(", ")
+        else { System.err.println("MARK_548"); expectedType.fields.map(_.name).map(toSQLId).mkString(", ") }
       throw QueryCompilationErrors.incompatibleDataToTableCannotFindDataError(tableName, colName)
     } else {
       None
@@ -587,7 +589,7 @@ object TableOutputResolver extends SQLConfHelper with Logging {
         }
       Some(applyColumnMetadata(castedArray, expected))
     } else if (enforceFullOutput) {
-      val colName = if (colPath.nonEmpty) colPath.quoted else toSQLId(expected.name)
+      val colName = if (colPath.nonEmpty) colPath.quoted else { System.err.println("MARK_590_657"); toSQLId(expected.name) }
       throw QueryCompilationErrors.incompatibleDataToTableCannotFindDataError(tableName, colName)
     } else {
       None
@@ -654,7 +656,7 @@ object TableOutputResolver extends SQLConfHelper with Logging {
         }
       Some(applyColumnMetadata(casted, expected))
     } else if (enforceFullOutput) {
-      val colName = if (colPath.nonEmpty) colPath.quoted else toSQLId(expected.name)
+      val colName = if (colPath.nonEmpty) colPath.quoted else { System.err.println("MARK_590_657"); toSQLId(expected.name) }
       throw QueryCompilationErrors.incompatibleDataToTableCannotFindDataError(tableName, colName)
     } else {
       None
