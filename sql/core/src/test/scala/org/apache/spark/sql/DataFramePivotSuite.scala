@@ -517,4 +517,75 @@ class DataFramePivotSuite extends SharedSparkSession {
         matchPVals = true)
     }
   }
+
+  test("SPARK-58959: duplicate pivot values each get their own output column") {
+    withTempView("dup_pivot") {
+      sql(
+        """CREATE OR REPLACE TEMP VIEW dup_pivot AS
+          |SELECT * FROM VALUES
+          |  (1, 1, 10),
+          |  (1, 2, 20),
+          |  (2, 1, 30)
+          |AS t(id, k, v)""".stripMargin)
+
+      // The optimized PivotFirst path deduplicates the pivot values into a map, so a repeated
+      // value must not shrink the aggregation buffer below the number of output columns.
+      val df = sql(
+        """SELECT * FROM dup_pivot
+          |PIVOT (SUM(v) FOR k IN (1 AS x, 1 AS y, 2 AS z))""".stripMargin)
+      assert(spark.sessionState.executePlan(df.queryExecution.logical).simpleString
+        .contains("pivotfirst"))
+      checkAnswer(df, Row(1, 10L, 10L, 20L) :: Row(2, 30L, 30L, null) :: Nil)
+
+      // The path that does not use PivotFirst answers the same query the same way.
+      checkAnswer(
+        sql(
+          """SELECT * FROM (SELECT id, k, ARRAY(v) AS v FROM dup_pivot)
+            |PIVOT (MIN(v) FOR k IN (1 AS x, 1 AS y, 2 AS z))""".stripMargin),
+        Row(1, Seq(10), Seq(10), Seq(20)) :: Row(2, Seq(30), Seq(30), null) :: Nil)
+    }
+  }
+
+  test("SPARK-58959: duplicate pivot values of every PivotFirst datatype") {
+    withTempView("dup_types") {
+      sql(
+        """CREATE OR REPLACE TEMP VIEW dup_types AS
+          |SELECT * FROM VALUES
+          |  ('a', 1Y, 1S, 1, 1L, 1.0F, 1.0D, 1.0BD, TRUE, 10),
+          |  ('b', 2Y, 2S, 2, 2L, 2.0F, 2.0D, 2.0BD, FALSE, 20)
+          |AS t(s, b, sh, i, l, f, d, dec, bool, v)""".stripMargin)
+
+      Seq("s" -> "'a'", "b" -> "1Y", "sh" -> "1S", "i" -> "1", "l" -> "1L",
+        "f" -> "1.0F", "d" -> "1.0D", "dec" -> "1.0BD", "bool" -> "TRUE").foreach {
+        case (column, value) =>
+          checkAnswer(
+            sql(
+              s"""SELECT * FROM (SELECT $column AS k, v FROM dup_types)
+                 |PIVOT (SUM(v) FOR k IN ($value AS x, $value AS y))""".stripMargin),
+            Row(10L, 10L))
+      }
+    }
+  }
+
+  test("SPARK-58959: pivot values that compare as equal share an output value") {
+    // The pivot column is collated, so PivotFirst indexes the values with a comparison-based
+    // TreeMap: 'a' and 'A' are distinct strings that compare as equal under UTF8_LCASE.
+    withTable("dup_lcase_pivot") {
+      sql(
+        """CREATE TABLE dup_lcase_pivot (
+          |  key STRING COLLATE UTF8_LCASE,
+          |  amount INT
+          |) USING PARQUET""".stripMargin)
+      sql(
+        """INSERT INTO dup_lcase_pivot VALUES
+          |  ('a', 10),
+          |  ('b', 20)""".stripMargin)
+
+      checkAnswer(
+        sql(
+          """SELECT * FROM dup_lcase_pivot
+            |PIVOT (SUM(amount) FOR key IN ('a' AS x, 'A' AS y, 'b' AS z))""".stripMargin),
+        Row(10L, 10L, 20L))
+    }
+  }
 }
