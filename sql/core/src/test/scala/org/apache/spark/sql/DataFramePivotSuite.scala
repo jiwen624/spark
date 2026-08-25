@@ -29,6 +29,10 @@ import org.apache.spark.sql.types._
 class DataFramePivotSuite extends SharedSparkSession {
   import testImplicits._
 
+  private def usesPivotFirst(df: DataFrame): Boolean = {
+    df.queryExecution.analyzed.exists(_.expressions.exists(_.exists(_.isInstanceOf[PivotFirst])))
+  }
+
   test("pivot courses") {
     val expected = Row(2012, 15000.0, 20000.0) :: Row(2013, 48000.0, 30000.0) :: Nil
     checkAnswer(
@@ -533,16 +537,41 @@ class DataFramePivotSuite extends SharedSparkSession {
       val df = sql(
         """SELECT * FROM dup_pivot
           |PIVOT (SUM(v) FOR k IN (1 AS x, 1 AS y, 2 AS z))""".stripMargin)
-      assert(spark.sessionState.executePlan(df.queryExecution.logical).simpleString
-        .contains("pivotfirst"))
+      assert(usesPivotFirst(df))
       checkAnswer(df, Row(1, 10L, 10L, 20L) :: Row(2, 30L, 30L, null) :: Nil)
 
       // The path that does not use PivotFirst answers the same query the same way.
+      val arrayDf = sql(
+        """SELECT * FROM (SELECT id, k, ARRAY(v) AS v FROM dup_pivot)
+          |PIVOT (MIN(v) FOR k IN (1 AS x, 1 AS y, 2 AS z))""".stripMargin)
+      assert(!usesPivotFirst(arrayDf))
       checkAnswer(
-        sql(
-          """SELECT * FROM (SELECT id, k, ARRAY(v) AS v FROM dup_pivot)
-            |PIVOT (MIN(v) FOR k IN (1 AS x, 1 AS y, 2 AS z))""".stripMargin),
+        arrayDf,
         Row(1, Seq(10), Seq(10), Seq(20)) :: Row(2, Seq(30), Seq(30), null) :: Nil)
+    }
+  }
+
+  test("SPARK-58959: duplicate pivot values do not corrupt a neighbouring aggregate buffer") {
+    withTempView("dup_multi_agg") {
+      sql(
+        """CREATE OR REPLACE TEMP VIEW dup_multi_agg AS
+          |SELECT * FROM VALUES
+          |  (1, 1, 10),
+          |  (1, 1, 40),
+          |  (1, 2, 20),
+          |  (2, 1, 30)
+          |AS t(id, k, v)""".stripMargin)
+
+      // With more than one aggregate the PivotFirst buffers sit back to back in a single row, so
+      // an out-of-range index reaches into the next aggregate's slots: SUM writes over MAX's
+      // buffer, and MAX runs off the end of the row entirely.
+      val df = sql(
+        """SELECT * FROM dup_multi_agg
+          |PIVOT (SUM(v) AS s, MAX(v) AS m FOR k IN (1 AS x, 1 AS y, 2 AS z))""".stripMargin)
+      assert(usesPivotFirst(df))
+      checkAnswer(
+        df,
+        Row(1, 50L, 40, 50L, 40, 20L, 20) :: Row(2, 30L, 30, 30L, 30, null, null) :: Nil)
     }
   }
 
