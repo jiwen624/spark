@@ -532,15 +532,12 @@ class DataFramePivotSuite extends SharedSparkSession {
           |  (2, 1, 30)
           |AS t(id, k, v)""".stripMargin)
 
-      // The optimized PivotFirst path deduplicates the pivot values into a map, so a repeated
-      // value must not shrink the aggregation buffer below the number of output columns.
       val df = sql(
         """SELECT * FROM dup_pivot
           |PIVOT (SUM(v) FOR k IN (1 AS x, 1 AS y, 2 AS z))""".stripMargin)
       assert(usesPivotFirst(df))
       checkAnswer(df, Row(1, 10L, 10L, 20L) :: Row(2, 30L, 30L, null) :: Nil)
 
-      // The path that does not use PivotFirst answers the same query the same way.
       val arrayDf = sql(
         """SELECT * FROM (SELECT id, k, ARRAY(v) AS v FROM dup_pivot)
           |PIVOT (MIN(v) FOR k IN (1 AS x, 1 AS y, 2 AS z))""".stripMargin)
@@ -562,9 +559,6 @@ class DataFramePivotSuite extends SharedSparkSession {
           |  (2, 1, 30)
           |AS t(id, k, v)""".stripMargin)
 
-      // With more than one aggregate the PivotFirst buffers sit back to back in a single row, so
-      // an out-of-range index reaches into the next aggregate's slots: SUM writes over MAX's
-      // buffer, and MAX runs off the end of the row entirely.
       val df = sql(
         """SELECT * FROM dup_multi_agg
           |PIVOT (SUM(v) AS s, MAX(v) AS m FOR k IN (1 AS x, 1 AS y, 2 AS z))""".stripMargin)
@@ -587,18 +581,16 @@ class DataFramePivotSuite extends SharedSparkSession {
       Seq("s" -> "'a'", "b" -> "1Y", "sh" -> "1S", "i" -> "1", "l" -> "1L",
         "f" -> "1.0F", "d" -> "1.0D", "dec" -> "1.0BD", "bool" -> "TRUE").foreach {
         case (column, value) =>
-          checkAnswer(
-            sql(
-              s"""SELECT * FROM (SELECT $column AS k, v FROM dup_types)
-                 |PIVOT (SUM(v) FOR k IN ($value AS x, $value AS y))""".stripMargin),
-            Row(10L, 10L))
+          val df = sql(
+            s"""SELECT * FROM (SELECT $column AS k, v FROM dup_types)
+               |PIVOT (SUM(v) FOR k IN ($value AS x, $value AS y))""".stripMargin)
+          assert(usesPivotFirst(df))
+          checkAnswer(df, Row(10L, 10L))
       }
     }
   }
 
   test("SPARK-58959: pivot values that compare as equal share an output value") {
-    // The pivot column is collated, so PivotFirst indexes the values with a comparison-based
-    // TreeMap: 'a' and 'A' are distinct strings that compare as equal under UTF8_LCASE.
     withTable("dup_lcase_pivot") {
       sql(
         """CREATE TABLE dup_lcase_pivot (
@@ -610,11 +602,56 @@ class DataFramePivotSuite extends SharedSparkSession {
           |  ('a', 10),
           |  ('b', 20)""".stripMargin)
 
-      checkAnswer(
-        sql(
-          """SELECT * FROM dup_lcase_pivot
-            |PIVOT (SUM(amount) FOR key IN ('a' AS x, 'A' AS y, 'b' AS z))""".stripMargin),
-        Row(10L, 10L, 20L))
+      val df = sql(
+        """SELECT * FROM dup_lcase_pivot
+          |PIVOT (SUM(amount) FOR key IN ('a' AS x, 'A' AS y, 'b' AS z))""".stripMargin)
+      assert(usesPivotFirst(df))
+      checkAnswer(df, Row(10L, 10L, 20L))
+    }
+
+    val structDf = sql(
+      """SELECT * FROM (SELECT named_struct('f', k) AS k, v FROM VALUES (1, 10), (2, 20) AS t(k, v))
+        |PIVOT (SUM(v) FOR k IN (
+        |  named_struct('f', 1) AS x, named_struct('f', 1) AS y, named_struct('f', 2) AS z))
+        |""".stripMargin)
+    assert(usesPivotFirst(structDf))
+    checkAnswer(structDf, Row(10L, 10L, 20L))
+  }
+
+  test("SPARK-58959: duplicate pivot values given through the DataFrame pivot API") {
+    val df = Seq((1, 1, 10), (1, 2, 20), (2, 1, 30)).toDF("id", "k", "v")
+      .groupBy("id").pivot("k", Seq(1, 1, 2)).sum("v")
+    assert(usesPivotFirst(df))
+    checkAnswer(df, Row(1, 10L, 10L, 20L) :: Row(2, 30L, 30L, null) :: Nil)
+  }
+
+  test("SPARK-58959: signed zeros and repeated NaN as pivot values") {
+    withTempView("dup_zero_pivot") {
+      sql(
+        """CREATE OR REPLACE TEMP VIEW dup_zero_pivot AS
+          |SELECT * FROM VALUES
+          |  (0.0D, 0.0F, 10),
+          |  (2.0D, 2.0F, 20)
+          |AS t(d, f, v)""".stripMargin)
+
+      val doubleDf = sql(
+        """SELECT * FROM (SELECT d AS k, v FROM dup_zero_pivot)
+          |PIVOT (SUM(v) FOR k IN (0.0D AS x, -0.0D AS y, 2.0D AS z))""".stripMargin)
+      assert(usesPivotFirst(doubleDf))
+      checkAnswer(doubleDf, Row(10L, 10L, 20L))
+
+      val floatDf = sql(
+        """SELECT * FROM (SELECT f AS k, v FROM dup_zero_pivot)
+          |PIVOT (SUM(v) FOR k IN (0.0F AS x, -0.0F AS y, 2.0F AS z))""".stripMargin)
+      assert(usesPivotFirst(floatDf))
+      checkAnswer(floatDf, Row(10L, 10L, 20L))
+
+      val nanDf = sql(
+        """SELECT * FROM (SELECT d AS k, v FROM dup_zero_pivot)
+          |PIVOT (SUM(v) FOR k IN (
+          |  DOUBLE('NaN') AS x, DOUBLE('NaN') AS y, 2.0D AS z))""".stripMargin)
+      assert(usesPivotFirst(nanDf))
+      checkAnswer(nanDf, Row(null, null, 20L))
     }
   }
 }

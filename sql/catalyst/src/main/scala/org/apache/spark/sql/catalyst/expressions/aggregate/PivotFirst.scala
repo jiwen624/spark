@@ -89,8 +89,6 @@ case class PivotFirst(
 
   private val usesTreeMap: Boolean = !TypeUtils.typeWithProperEquals(pivotColumn.dataType)
 
-  // Every pivot value gets a buffer slot, shared between the values that compare as equal, so a
-  // repeated value does not shrink the buffer below the number of output columns.
   private val (pivotIndex, slotOfValue, slotValues) = {
     val slots = new Array[Int](pivotColumnValues.length)
     val values = mutable.ArrayBuffer.empty[Any]
@@ -100,13 +98,13 @@ case class PivotFirst(
       HashMap.empty[Any, Int]
     }
     pivotColumnValues.zipWithIndex.foreach { case (value, i) =>
-      val existingSlot = index.getOrElse(value, -1)
-      if (existingSlot >= 0) {
-        slots(i) = existingSlot
-      } else {
-        slots(i) = values.length
-        index = index.updated(value, values.length)
-        values += value
+      index.get(value) match {
+        case Some(existingSlot) =>
+          slots(i) = existingSlot
+        case None =>
+          slots(i) = values.length
+          index = index.updated(value, values.length)
+          values += value
       }
     }
     (index, slots, values.toSeq)
@@ -121,6 +119,8 @@ case class PivotFirst(
     case _ => pivotIndex.getOrElse(key, -1)
   }
 
+  // Values that compare as equal share a slot, so this counts distinct slots; the output has one
+  // element per entry in slotOfValue.
   val indexSize = slotValues.length
 
   private val updateRow: (InternalRow, Int, Any) => Unit = PivotFirst.updateFunction(valueDataType)
