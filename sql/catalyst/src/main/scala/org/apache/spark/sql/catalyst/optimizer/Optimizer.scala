@@ -37,6 +37,7 @@ import org.apache.spark.sql.catalyst.trees.TreePattern._
 import org.apache.spark.sql.catalyst.types.DataTypeUtils
 import org.apache.spark.sql.catalyst.types.DataTypeUtils.toAttributes
 import org.apache.spark.sql.catalyst.util.AUTO_GENERATED_ALIAS
+import org.apache.spark.sql.catalyst.util.UnsafeRowUtils.isBinaryStable
 import org.apache.spark.sql.connector.catalog.CatalogManager
 import org.apache.spark.sql.errors.QueryCompilationErrors
 import org.apache.spark.sql.internal.SQLConf
@@ -2690,7 +2691,8 @@ object PushPredicateThroughNonJoin extends Rule[LogicalPlan] with PredicateHelpe
       val (pushDown, stayUp) = splitConjunctivePredicates(condition).partition { cond =>
         val replaced = replaceAlias(cond, aliasMap)
         cond.deterministic && cond.references.nonEmpty &&
-          replaced.references.subsetOf(aggregate.child.outputSet)
+          replaced.references.subsetOf(aggregate.child.outputSet) &&
+          isGroupInvariant(cond, aggregate.outputSet)
       }
 
       if (pushDown.nonEmpty) {
@@ -2717,7 +2719,7 @@ object PushPredicateThroughNonJoin extends Rule[LogicalPlan] with PredicateHelpe
         splitConjunctivePredicates(condition).partition(_.deterministic)
 
       val (pushDown, rest) = candidates.partition { cond =>
-        cond.references.subsetOf(partitionAttrs)
+        cond.references.subsetOf(partitionAttrs) && isGroupInvariant(cond, partitionAttrs)
       }
 
       val stayUp = rest ++ nonDeterministic
@@ -2802,6 +2804,17 @@ object PushPredicateThroughNonJoin extends Rule[LogicalPlan] with PredicateHelpe
     case _: BinBy => true
     case _ => false
   }
+
+  def isGroupInvariant(predicate: Expression, groupingAttrs: AttributeSet): Boolean =
+    predicate match {
+      case a: Attribute => !groupingAttrs.contains(a) || isBinaryStable(a.dataType)
+      case b: BinaryComparison if b.children.forall(_.dataType == b.left.dataType) =>
+        b.children.forall {
+          case _: Attribute => true
+          case c => isGroupInvariant(c, groupingAttrs)
+        }
+      case other => other.children.forall(isGroupInvariant(_, groupingAttrs))
+    }
 
   private def pushDownPredicate(
       filter: Filter,

@@ -2472,6 +2472,30 @@ class CollationSuite extends DatasourceV2SQLBase with AdaptiveSparkPlanHelper {
     }
   }
 
+  test("SPARK-60450: collation-sensitive predicates are not pushed through grouping") {
+    withTable("events", "users") {
+      sql("CREATE TABLE events (email STRING COLLATE UTF8_LCASE, ts INT, v STRING) USING parquet")
+      sql("INSERT INTO events VALUES ('bob@x.com', 1, 'old'), ('Bob@x.com', 2, 'new')")
+      sql("CREATE TABLE users (email STRING) USING parquet")
+      sql("INSERT INTO users VALUES ('bob@x.com')")
+      val latest = "SELECT email, v, " +
+        "row_number() OVER (PARTITION BY email ORDER BY ts DESC) AS rn FROM events"
+      val counts = "SELECT email, count(*) AS cnt FROM events GROUP BY email"
+
+      checkAnswer(
+        sql(s"SELECT * FROM ($latest) WHERE rn = 1 AND email = 'bob@x.com' COLLATE UTF8_BINARY"),
+        Seq.empty)
+      checkAnswer(
+        sql(s"SELECT * FROM ($latest) l LEFT SEMI JOIN users u " +
+          "ON l.email = u.email COLLATE UTF8_BINARY"),
+        Row("bob@x.com", "old", 2))
+      assert(sql(s"SELECT cnt FROM ($counts) WHERE email = 'bob@x.com' COLLATE UTF8_BINARY")
+        .collect().forall(_.getLong(0) == 2))
+      assert(sql(s"SELECT cnt FROM ($counts) c LEFT SEMI JOIN users u " +
+        "ON c.email = u.email COLLATE UTF8_BINARY").collect().forall(_.getLong(0) == 2))
+    }
+  }
+
   test("ConstantPropagation: replaces binary-stable attributes with contradicting predicates") {
     withTable("t1") {
       sql("CREATE TABLE t1 (c STRING)")

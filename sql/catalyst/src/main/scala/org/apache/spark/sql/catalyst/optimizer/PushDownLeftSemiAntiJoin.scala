@@ -70,7 +70,8 @@ object PushDownLeftSemiAntiJoin extends Rule[LogicalPlan]
       val canPushDownPredicate = (predicate: Expression) => {
         val replaced = replaceAlias(predicate, aliasMap)
         predicate.references.nonEmpty &&
-          replaced.references.subsetOf(agg.child.outputSet ++ rightOp.outputSet)
+          replaced.references.subsetOf(agg.child.outputSet ++ rightOp.outputSet) &&
+          PushPredicateThroughNonJoin.isGroupInvariant(predicate, agg.outputSet)
       }
       val makeJoinCondition = (predicates: Seq[Expression]) => {
         replaceAlias(predicates.reduce(And), aliasMap)
@@ -80,8 +81,10 @@ object PushDownLeftSemiAntiJoin extends Rule[LogicalPlan]
     // LeftSemi/LeftAnti over Window
     case join @ Join(w: Window, rightOp, LeftSemiOrAnti(_), _, _)
         if w.partitionSpec.forall(_.isInstanceOf[AttributeReference]) =>
-      val partitionAttrs = AttributeSet(w.partitionSpec.flatMap(_.references)) ++ rightOp.outputSet
-      pushDownJoin(join, _.references.subsetOf(partitionAttrs), _.reduce(And))
+      val windowPartitionAttrs = AttributeSet(w.partitionSpec.flatMap(_.references))
+      val partitionAttrs = windowPartitionAttrs ++ rightOp.outputSet
+      pushDownJoin(join, p => p.references.subsetOf(partitionAttrs) &&
+        PushPredicateThroughNonJoin.isGroupInvariant(p, windowPartitionAttrs), _.reduce(And))
 
     // LeftSemi/LeftAnti over Union
     case Join(union: Union, rightOp, LeftSemiOrAnti(joinType), joinCond, hint)
